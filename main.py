@@ -1,148 +1,132 @@
 from fastmcp import FastMCP
 import os
-import sqlite3
-
-mcp = FastMCP("Expense_tracker_2_server")
-DB_PATH = os.path.join(os.path.dirname(__file__), "expenses.db")
+import aiosqlite  # Changed: sqlite3 → aiosqlite
+import tempfile
+# Use temporary directory which should be writable
+TEMP_DIR = tempfile.gettempdir()
+DB_PATH = os.path.join(TEMP_DIR, "expenses.db")
 CATEGORIES_PATH = os.path.join(os.path.dirname(__file__), "categories.json")
 
+print(f"Database path: {DB_PATH}")
 
-def init_db():
-    """Initialize the database and create the expenses table if it doesn't exist."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS expenses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            amount REAL NOT NULL,
-            category TEXT NOT NULL,
-            subcategory TEXT DEFAULT '',
-            note TEXT DEFAULT ''
-        )
-    ''')
-    conn.commit()
-    conn.close()
-    
+mcp = FastMCP("ExpenseTracker")
+
+def init_db():  # Keep as sync for initialization
+    try:
+        # Use synchronous sqlite3 just for initialization
+        import sqlite3
+        with sqlite3.connect(DB_PATH) as c:
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS expenses(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    category TEXT NOT NULL,
+                    subcategory TEXT DEFAULT '',
+                    note TEXT DEFAULT ''
+                )
+            """)
+            # Test write access
+            c.execute("INSERT OR IGNORE INTO expenses(date, amount, category) VALUES ('2000-01-01', 0, 'test')")
+            c.execute("DELETE FROM expenses WHERE category = 'test'")
+            print("Database initialized successfully with write access")
+    except Exception as e:
+        print(f"Database initialization error: {e}")
+        raise
+
+# Initialize database synchronously at module load
 init_db()
 
 @mcp.tool()
-def add_expense(amount:float , date,category, subcategory:str="",note=""):
-    "Add a new expenses to the database"
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO expenses (date, amount, category, subcategory, note)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (date, amount, category, subcategory, note))
-    conn.commit()
-    conn.close()
-    return {"status":"sucess","message":"Expense added successfully." , "id": cursor.lastrowid}
-
-# create a mcp tool to list all the expenses in the database
+async def add_expense(date, amount, category, subcategory="", note=""):  # Changed: added async
+    '''Add a new expense entry to the database.'''
+    try:
+        async with aiosqlite.connect(DB_PATH) as c:  # Changed: added async
+            cur = await c.execute(  # Changed: added await
+                "INSERT INTO expenses(date, amount, category, subcategory, note) VALUES (?,?,?,?,?)",
+                (date, amount, category, subcategory, note)
+            )
+            expense_id = cur.lastrowid
+            await c.commit()  # Changed: added await
+            return {"status": "success", "id": expense_id, "message": "Expense added successfully"}
+    except Exception as e:  # Changed: simplified exception handling
+        if "readonly" in str(e).lower():
+            return {"status": "error", "message": "Database is in read-only mode. Check file permissions."}
+        return {"status": "error", "message": f"Database error: {str(e)}"}
+    
 @mcp.tool()
-def list_expenses():
-    "List all expenses in the database"
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM expenses')
-    rows = cursor.fetchall()
-    conn.close()
-    expenses = []
-    for row in rows:
-        expenses.append({
-            "id": row[0],
-            "date": row[1],
-            "amount": row[2],
-            "category": row[3],
-            "subcategory": row[4],
-            "note": row[5]
-        })
-    return expenses
+async def list_expenses(start_date, end_date):  # Changed: added async
+    '''List expense entries within an inclusive date range.'''
+    try:
+        async with aiosqlite.connect(DB_PATH) as c:  # Changed: added async
+            cur = await c.execute(  # Changed: added await
+                """
+                SELECT id, date, amount, category, subcategory, note
+                FROM expenses
+                WHERE date BETWEEN ? AND ?
+                ORDER BY date DESC, id DESC
+                """,
+                (start_date, end_date)
+            )
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in await cur.fetchall()]  # Changed: added await
+    except Exception as e:
+        return {"status": "error", "message": f"Error listing expenses: {str(e)}"}
 
-# mcp tool to get the summary of the expenses , either all or cateogory wise or date range wise
 @mcp.tool()
-def get_expense_summary(category: str = None, start_date: str = None, end_date: str = None):
-    "Get the summary of expenses, optionally filtered by category or date range"
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    query = '''
-        SELECT 
-            SUM(amount) as total_amount,
-            GROUP_CONCAT(DISTINCT category) as categories,
-            MIN(date) as start_date,
-            MAX(date) as end_date
-        FROM expenses
-        WHERE 1=1
-    '''
-    params = []
-    if category:
-        query += ' AND category = ?'
-        params.append(category)
-    if start_date:
-        query += ' AND date >= ?'
-        params.append(start_date)
-    if end_date:
-        query += ' AND date <= ?'
-        params.append(end_date)
-    cursor.execute(query, params)
-    total = cursor.fetchone()[0]
-    conn.close()
-    return {"total_expense": total if total else 0}
+async def summarize(start_date, end_date, category=None):  # Changed: added async
+    '''Summarize expenses by category within an inclusive date range.'''
+    try:
+        async with aiosqlite.connect(DB_PATH) as c:  # Changed: added async
+            query = """
+                SELECT category, SUM(amount) AS total_amount, COUNT(*) as count
+                FROM expenses
+                WHERE date BETWEEN ? AND ?
+            """
+            params = [start_date, end_date]
 
-# tool to delete an expense by id
-@mcp.tool()
-def delete_expense(expense_id: int):
-    "Delete an expense by its ID"
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM expenses WHERE id = ?', (expense_id,))
-    conn.commit()
-    affected_rows = cursor.rowcount
-    conn.close()
-    if affected_rows == 0:
-        return {"status":"failure","message":"Expense not found."}
-    return {"status":"success","message":"Expense deleted successfully."}
+            if category:
+                query += " AND category = ?"
+                params.append(category)
 
-# tool to update an expense by id
-@mcp.tool()
-def update_expense(expense_id: int, amount: float = None, date: str = None, category: str = None, subcategory: str = None, note: str = None):
-    "Update an existing expense by its ID"
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    fields = []
-    params = []
-    if amount is not None:
-        fields.append("amount = ?")
-        params.append(amount)
-    if date is not None:
-        fields.append("date = ?")
-        params.append(date)
-    if category is not None:
-        fields.append("category = ?")
-        params.append(category)
-    if subcategory is not None:
-        fields.append("subcategory = ?")
-        params.append(subcategory)
-    if note is not None:
-        fields.append("note = ?")
-        params.append(note)
-    params.append(expense_id)
-    query = f'UPDATE expenses SET {", ".join(fields)} WHERE id = ?'
-    cursor.execute(query, params)
-    conn.commit()
-    affected_rows = cursor.rowcount
-    conn.close()
-    if affected_rows == 0:
-        return {"status":"failure","message":"Expense not found or no changes made."}
-    return {"status":"success","message":"Expense updated successfully."}
+            query += " GROUP BY category ORDER BY total_amount DESC"
 
-# Resources for expense categories
-@mcp.resource("expense://categories",mime_type="application/json",description="The list of expense categories and sub categories")
+            cur = await c.execute(query, params)  # Changed: added await
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in await cur.fetchall()]  # Changed: added await
+    except Exception as e:
+        return {"status": "error", "message": f"Error summarizing expenses: {str(e)}"}
+
+@mcp.resource("expense:///categories", mime_type="application/json")  # Changed: expense:// → expense:///
 def categories():
-    with open(CATEGORIES_PATH, "r") as f:
-        return f.read()
+    try:
+        # Provide default categories if file doesn't exist
+        default_categories = {
+            "categories": [
+                "Food & Dining",
+                "Transportation",
+                "Shopping",
+                "Entertainment",
+                "Bills & Utilities",
+                "Healthcare",
+                "Travel",
+                "Education",
+                "Business",
+                "Other"
+            ]
+        }
         
+        try:
+            with open(CATEGORIES_PATH, "r", encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError:
+            import json
+            return json.dumps(default_categories, indent=2)
+    except Exception as e:
+        return f'{{"error": "Could not load categories: {str(e)}"}}'
+
+# Start the server
 
 # For local MCP Server
 # if __name__== "__main__":
