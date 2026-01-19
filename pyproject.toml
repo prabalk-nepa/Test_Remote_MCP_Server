@@ -1,10 +1,15 @@
 [project]
-name = "fast-mcp-initials"
+name = "expense-tracker-mcp"
 version = "0.1.0"
-description = "Add your description here"
+description = "Multi-organizational expense tracker MCP server with React client"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "aiosqlite>=0.22.1",
     "fastmcp>=2.14.3",
+    "aiosqlite>=0.20.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "python-dotenv>=1.0",
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
 ]

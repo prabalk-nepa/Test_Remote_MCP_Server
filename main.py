@@ -1,3 +1,4 @@
+from datetime import date
 from fastmcp import FastMCP
 import os
 import aiosqlite  # Changed: sqlite3 → aiosqlite
@@ -125,6 +126,58 @@ def categories():
             return json.dumps(default_categories, indent=2)
     except Exception as e:
         return f'{{"error": "Could not load categories: {str(e)}"}}'
+
+# mcp tool to edit an expense
+@mcp.tool()
+async def edit_expense(expense_id, start_date=None,end_date=None, amount=None, category=None, subcategory=None, note=None):  # Changed: added async
+    '''Edit an existing expense entry in the database.'''
+    try:
+        async with aiosqlite.connect(DB_PATH) as c:  # Changed: added async
+            fields = []
+            params = []
+
+            if start_date is not None:
+                fields.append("date = ?")
+                params.append(start_date)
+            if end_date is not None:
+                fields.append("date = ?")
+                params.append(end_date)
+            if amount is not None:
+                fields.append("amount = ?")
+                params.append(amount)
+            if category is not None:
+                fields.append("category = ?")
+                params.append(category)
+            if subcategory is not None:
+                fields.append("subcategory = ?")
+                params.append(subcategory)
+            if note is not None:
+                fields.append("note = ?")
+                params.append(note)
+
+            if not fields:
+                return {"status": "error", "message": "No fields to update"}
+
+            params.append(expense_id)
+            query = f"UPDATE expenses SET {', '.join(fields)} WHERE id = ?"
+            await c.execute(query, params)  # Changed: added await
+            await c.commit()  # Changed: added await
+            return {"status": "success", "message": "Expense updated successfully"}
+    except Exception as e:
+        return {"status": "error", "message": f"Error updating expense: {str(e)}"}
+
+#Mcp tool to delete an expense
+@mcp.tool()
+async def delete_expense(expense_id):  # Changed: added async
+    '''Delete an expense entry from the database.'''
+    try:
+        async with aiosqlite.connect(DB_PATH) as c:  # Changed: added async
+            await c.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))  # Changed: added await
+            await c.commit()  # Changed: added await
+            return {"status": "success", "message": "Expense deleted successfully"}
+    except Exception as e:
+        return {"status": "error", "message": f"Error deleting expense: {str(e)}"}
+
 
 # Start the server
 
